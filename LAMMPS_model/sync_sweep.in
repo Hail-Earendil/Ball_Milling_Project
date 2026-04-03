@@ -1,0 +1,46 @@
+# Sweep template — no trajectory dump, no contact dump
+# Variables passed via -v flag: nsteps, mu11
+# mu11: friction for pair 1-1 (ore-ore). LAMMPS geometric-mean mixing gives
+# mu_eff(1-2) = sqrt(mu11 * 0.3). For default mu_eff=0.47: mu11=0.75.
+
+units           si
+atom_style      sphere
+newton          off
+
+boundary        p p f
+read_data       3ps.dat
+
+group           fine   id 1
+group           bigfree id 2
+group           bigfix  id 3
+
+pair_style granular
+pair_coeff 1 1 hertz/material 7.782e10 0.5 0.28 tangential mindlin NULL 0.0 ${mu11} damping coeff_restitution synchronized_verlet
+pair_coeff 2 2 hertz/material 2.08e11  0.5 0.27 tangential mindlin NULL 0.0 0.3    damping coeff_restitution synchronized_verlet
+
+timestep        1e-7
+
+fix             frz bigfix freeze
+fix             1 all nve/sphere
+fix             2 all wall/gran granular hooke 1e4 0.5 tangential linear_history 8235 0 0.5 damping coeff_restitution zplane $(zlo) $(zhi)
+
+compute         astress all stress/atom NULL pair
+dump            Sdump all custom 100 stress.dump id type x y z diameter c_astress[1] c_astress[2] c_astress[3] c_astress[4] c_astress[5] c_astress[6]
+dump_modify     Sdump sort id
+
+dump            A all custom 100 op1.dump id type x y z vx vy vz omegax omegay omegaz diameter
+dump_modify     A sort id
+
+# Per-atom forces on ore (1) and mover (2) — for Weibull criterion
+# F_ore-from-mover = -f_mover  (Newton's 3rd; mover has no wall contact)
+# F_ore-from-fixed = f_ore + f_mover
+group           ore_mover id 1 2
+dump            Fdump ore_mover custom 100 forces.dump id fx fy fz
+dump_modify     Fdump sort id
+
+comm_modify     vel yes
+thermo          100
+thermo_style    custom step ke
+run_style       verlet
+
+run             ${nsteps}

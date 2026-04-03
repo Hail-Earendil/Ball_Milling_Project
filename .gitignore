@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+__MACOSX/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Office lock files
+~$*
+
+# LAMMPS run artefacts (regenerable)
+results/plots/timeseries/runs/
+results/plots/dump_study/de1_runs/
+
+# Backup CSVs
+results/csv/sweep_results_backup_*.csv
+results/csv/sweep_results_coarse_backup.csv
+
+# Large binary files — regenerable or proprietary
+yau_paper.pdf
+Ball_Milling_Figures.pptx
+
+# Generated plots — all regenerable by running plot scripts
+results/plots/
+
+# LaTeX build artifacts
+*.aux
+*.fls
+*.fdb_latexmk
+*.log
+*.synctex.gz

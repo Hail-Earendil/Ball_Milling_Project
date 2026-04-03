@@ -1,0 +1,554 @@
+\documentclass{article}
+\usepackage{amsmath, amssymb}
+\usepackage{geometry}
+\usepackage{titlesec}
+\usepackage{booktabs}
+\geometry{margin=2.5cm}
+
+\title{Core Equations: Ball Mill Ore Fracture}
+\author{Daniel Cui}
+\date{}
+
+\begin{document}
+\maketitle
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Simulation Parameters}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Swept Input Parameters}
+
+Five parameters are varied across simulation runs.
+The default value is used whenever a parameter is held fixed.
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{@{}llccc@{}}
+\toprule
+Symbol & Description & Default & Range & Grid points \\
+\midrule
+$v$           & Impact velocity (m/s)         & 3.0    & 0.5 -- 5.0      & 46 (step 0.1) \\
+$\alpha$      & Impact angle ($^{\circ}$)     & 0      & $-90$ -- $90$   & 46 (step 4) \\
+$b$           & Impact parameter (m)          & 0      & $0$ -- $R\!+\!r$ & 45 (44 intervals) \\
+$\chi = R/r$  & Size ratio                    & 4      & 2 -- 20         & 46 (step 0.4) \\
+$\mu$         & Friction coefficient          & 0.47   & 0 -- 1          & 41 (step 0.025) \\
+\bottomrule
+\end{tabular}
+\caption{Swept parameters. $b_{\max} = R + r = R(1 + 1/\chi)$ varies with $\chi$.}
+\end{table}
+
+\subsection{Fixed Geometric Constants}
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{@{}llc@{}}
+\toprule
+Symbol & Description & Value \\
+\midrule
+$R$       & Grinding ball radius        & $0.025$ m \\
+$g$       & Launch gap (mover to ore)   & $0.010$ m \\
+$\Delta t$ & LAMMPS timestep            & $1\times10^{-7}$ s \\
+\bottomrule
+\end{tabular}
+\caption{Fixed geometric and simulation constants.}
+\end{table}
+
+\subsection{Material Properties}
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Property & Symbol & Limestone ore & Steel ball \\
+\midrule
+Density (kg\,m$^{-3}$)   & $\rho$   & 2600    & 7800 \\
+Young's modulus (GPa)     & $E$      & 77.82   & 208  \\
+Poisson ratio             & $\nu$    & 0.28    & 0.27 \\
+Restitution coefficient   & $e$      & 0.50    & 0.50 \\
+\bottomrule
+\end{tabular}
+\caption{Material properties used in LAMMPS contact model.}
+\end{table}
+
+\subsection{Fracture Criterion Constants}
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{@{}llcc@{}}
+\toprule
+Criterion & Symbol & Description & Value \\
+\midrule
+Christensen & $\sigma_T$ & Tensile strength of limestone  & 22.4 MPa \\
+            & $\sigma_C$ & Compressive strength of limestone & 147 MPa \\[4pt]
+Weibull     & $w$        & Weibull modulus                & 2.73 \\
+            & $d_0$      & Reference particle diameter    & 120 mm \\
+            & $\sigma_{pc,0}$ & Crush stress at $d_0$     & 5.579 MPa \\
+\bottomrule
+\end{tabular}
+\caption{Constants for the two fracture criteria (Sections~\ref{sec:christensen} and~\ref{sec:weibull}).}
+\end{table}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Theory 1: DEM + Christensen Criterion}
+\label{sec:christensen}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Christensen Failure Criterion}
+
+For a brittle material with uniaxial tensile strength $\sigma_T$ and
+compressive strength $\sigma_C$, the utilisation index is:
+
+\begin{equation}
+    U = \frac{1}{k^2}
+        \left[
+            \frac{\alpha_c \, k}{\sqrt{3}} \, \sigma_{kk}
+            \;+\;
+            \frac{1 + \alpha_c}{2} \, s_{ij} s_{ij}
+        \right]
+\end{equation}
+
+where the material parameters are:
+\begin{align}
+    \alpha_c &= \frac{\sigma_T}{\sigma_C} - 1, \qquad
+    k        = \frac{\sigma_C}{\sqrt{3}}
+\end{align}
+
+and the stress invariants are:
+\begin{align}
+    \sigma_{kk}  &= \sigma_{xx} + \sigma_{yy} + \sigma_{zz}
+                   \quad\text{(hydrostatic trace)} \\[4pt]
+    s_{ij}       &= \sigma_{ij} - \tfrac{1}{3}\sigma_{kk}\,\delta_{ij}
+                   \quad\text{(deviatoric stress tensor)} \\[4pt]
+    s_{ij}s_{ij} &= s_{xx}^2 + s_{yy}^2 + s_{zz}^2
+                   + 2\!\left(s_{xy}^2 + s_{xz}^2 + s_{yz}^2\right)
+\end{align}
+
+\noindent\textbf{Fracture criterion:} $U \geq 1$.
+
+\subsection{DEM Implementation Pipeline}
+
+LAMMPS outputs a per-atom virial stress tensor $W_{ij}$ via
+\texttt{compute stress/atom}.  The following steps convert it to $U$:
+
+\begin{enumerate}
+    \item \textbf{Identify the first contact window.}
+          From the position dump (\texttt{op1.dump}), find all timesteps where the
+          mover–ore overlap $\delta = (R+r) - |\mathbf{x}_{\text{mover}} -
+          \mathbf{x}_{\text{ore}}| > 0$.  Only the first continuous contact
+          event is analysed.
+
+    \item \textbf{Cauchy stress.}
+          Convert the LAMMPS virial to a volumetric Cauchy stress:
+          \begin{equation}
+              \sigma_{ij} = \frac{W_{ij}}{V}, \qquad V = \frac{\pi}{6}\,d^3
+          \end{equation}
+          where $d$ is the ore diameter read from \texttt{op1.dump}.
+
+    \item \textbf{Branch-length correction.}
+          The virial sums over the full centre-to-centre branch vector between
+          contacting atoms; only the fraction lying \emph{inside} the ore should
+          contribute.  The corrected stress is:
+          \begin{equation}
+              \sigma_{ij}^{\text{corr}} = \lambda\,\sigma_{ij}, \qquad
+              \lambda = \frac{2}{1+\chi}
+          \end{equation}
+          At $\chi = 4$: $\lambda = 0.4$.
+
+    \item \textbf{Evaluate $U$.}
+          Apply Eq.~(1) to $\sigma_{ij}^{\text{corr}}$ at each timestep in the
+          window and record $U_{\max}$.
+
+    \item \textbf{Fracture decision.}
+          Fracture is predicted if $U_{\max} \geq 1$.
+\end{enumerate}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Theory 2: Analytic Energy Fracture Criterion}
+\label{sec:theory2}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Assumptions}
+
+\begin{enumerate}
+    \item Uniaxial collision (head-on, $b = 0$).
+    \item No damping — kinetic energy is fully converted to elastic strain energy.
+\end{enumerate}
+
+\subsection{Critical Force and Deflection}
+
+The maximum contact stress under a Hertzian load $F$ acting on the ore (radius $r$) is:
+\begin{equation}
+    \sigma_{xx} = \frac{3}{2}\frac{F}{\pi r^2}
+\end{equation}
+
+Fracture occurs at $\sigma_{xx} = \sigma_c$, giving the critical force and deflection:
+\begin{align}
+    F_c &= \frac{2}{3}\pi r^2 \sigma_c \\[6pt]
+    \delta_c &= \left(\frac{3\,F_c}{4\,E_{\text{eff}}\,R_{\text{eff}}^{1/2}}\right)^{2/3}
+\end{align}
+
+where the effective radius combines the mover ($R$) and ore ($r$):
+\begin{equation}
+    \frac{1}{R_{\text{eff}}} = \frac{1}{r} + \frac{1}{R}
+    \;\Rightarrow\;
+    R_{\text{eff}} = \frac{\chi\,r}{1+\chi}
+\end{equation}
+
+and the effective Young's modulus combines both materials:
+\begin{equation}
+    \frac{1}{E_{\text{eff}}} = \frac{1-\nu_1^2}{E_1} + \frac{1-\nu_2^2}{E_2}
+\end{equation}
+
+\subsection{Critical Strain Energy}
+
+The elastic energy stored in \emph{one} Hertz contact at the critical deflection is:
+\begin{equation}
+    U_{\text{pair}} = \int_0^{\delta_c} F\,d\delta
+    = \frac{4}{3}E_{\text{eff}}R_{\text{eff}}^{1/2}
+      \int_0^{\delta_c}\delta^{3/2}\,d\delta
+    = \frac{8}{15}\,E_{\text{eff}}\,R_{\text{eff}}^{1/2}\,\delta_c^{5/2}
+\end{equation}
+
+The ore is compressed between \emph{two} balls (mover and fixed), so the total
+critical energy is $E_c = 2\,U_{\text{pair}}$:
+
+\begin{equation}
+    E_c = \frac{16}{15}\,E_{\text{eff}}^{-2/3}\,r^{3}
+          \left(\frac{\chi}{1+\chi}\right)^{-1/3}\!\sigma_c^{5/3}
+          \left(\frac{\pi}{2}\right)^{5/3}
+\end{equation}
+
+\subsection{Head-On Critical Velocity}
+
+Setting the mover's kinetic energy equal to $E_c$
+(mover volume $V_{\text{mover}} = \tfrac{4}{3}\pi R^3 = \tfrac{4}{3}\pi(\chi r)^3$):
+
+\begin{equation}
+    \frac{1}{2}\rho_{\text{steel}}\cdot\frac{4}{3}\pi(\chi r)^3\cdot v_c^2 = E_c
+\end{equation}
+
+\begin{equation}
+\boxed{
+    v_c = \frac{2^{2/3}\sqrt{5}\,\pi^{1/3}\,\sigma_c^{5/6}\,\chi^{-5/3}(1+\chi)^{1/6}}
+               {5\,\rho_{\text{steel}}^{1/2}\,E_{\text{eff}}^{1/3}}
+}
+\end{equation}
+
+At default parameters ($\chi=4$, $\sigma_c = 147$ MPa, $\rho_{\text{steel}}=7800$ kg/m$^3$):
+$v_c = 2.483$ m/s.
+
+\subsection{Extension to Oblique Impact}
+
+For a general impact, only the effective compression velocity does work on the ore:
+\begin{equation}
+    v_x = |v|\cos\alpha\cos\gamma, \qquad
+    \gamma(b,\chi) = \arcsin\!\left(\frac{b}{R + R/\chi}\right)
+\end{equation}
+
+Substituting $v \to v_x$ into the head-on energy balance gives the general critical velocity:
+\begin{equation}
+\boxed{
+    v_c(\alpha,\,b,\,\chi)
+    = \frac{2^{2/3}\sqrt{5}\,\pi^{1/3}\,\sigma_c^{5/6}\,\chi^{-5/3}(1+\chi)^{1/6}}
+           {5\,\rho_{\text{steel}}^{1/2}\,E_{\text{eff}}^{1/3}\,|\cos\alpha|\,\sqrt{1 - \left(\dfrac{b}{R+R/\chi}\right)^{\!2}}}
+}
+\end{equation}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Theory 3: DEM + Weibull Weakest-Link Criterion}
+\label{sec:weibull}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Weibull Size-Scaling Law}
+
+The characteristic particle crushing stress scales with particle diameter $d_p$
+according to the Weibull weakest-link model:
+\begin{equation}
+    \sigma_{pc}(d_p) = \sigma_{pc,0} \left(\frac{d_p}{d_0}\right)^{-3/w}
+\end{equation}
+
+The corresponding failure load (using $F = \sigma_{pc}\,d_p^2$) is:
+\begin{equation}
+    F_{f,W}(d_p) = \sigma_{pc,0} \left(\frac{d_p}{d_0}\right)^{-3/w} d_p^2
+\end{equation}
+
+where $d_p = 2r = 2R/\chi$ is the ore diameter, and $w$, $d_0$, $\sigma_{pc,0}$
+are the Weibull constants from Table~4.
+
+\subsection{Compression Axis}
+
+The ore is loaded simultaneously by the mover and the fixed ball.
+Let $\hat{\mathbf{r}}_{21}$ and $\hat{\mathbf{r}}_{23}$ be the unit vectors from
+the ore centre toward the fixed ball and mover, respectively:
+\begin{equation}
+    \hat{\mathbf{r}}_{21} = \frac{\mathbf{x}_{\text{fixed}} - \mathbf{x}_{\text{ore}}}
+                                  {|\mathbf{x}_{\text{fixed}} - \mathbf{x}_{\text{ore}}|},
+    \qquad
+    \hat{\mathbf{r}}_{23} = \frac{\mathbf{x}_{\text{mover}} - \mathbf{x}_{\text{ore}}}
+                                  {|\mathbf{x}_{\text{mover}} - \mathbf{x}_{\text{ore}}|}
+\end{equation}
+
+The compression axis is the bisector of these two directions:
+\begin{equation}
+    \hat{\mathbf{n}} = \frac{\hat{\mathbf{r}}_{21} - \hat{\mathbf{r}}_{23}}
+                            {|\hat{\mathbf{r}}_{21} - \hat{\mathbf{r}}_{23}|}
+\end{equation}
+
+This sign convention ensures that both contact force projections are positive
+during compression (verified at head-on: $\hat{\mathbf{n}} = -\hat{x}$,
+$\mathbf{F}_{\text{mover}}\cdot\hat{\mathbf{n}} > 0$,
+$-\mathbf{F}_{\text{fixed}}\cdot\hat{\mathbf{n}} > 0$).
+
+\subsection{Effective Compression Force}
+
+Let $\mathbf{F}_{1\leftarrow2}$ and $\mathbf{F}_{1\leftarrow3}$ be the forces on
+the ore from the mover and fixed ball, respectively (recovered from \texttt{forces.dump}
+as described in Section~\ref{sec:sim}).  Their projections onto $\hat{\mathbf{n}}$ are:
+\begin{equation}
+    F_2^n = \mathbf{F}_{1\leftarrow2}\cdot\hat{\mathbf{n}}, \qquad
+    F_3^n = -\mathbf{F}_{1\leftarrow3}\cdot\hat{\mathbf{n}}
+\end{equation}
+
+The effective compression force is the average of the two (a symmetric diametral
+loading is assumed, consistent with the Weibull test geometry):
+\begin{equation}
+    F_{\text{eff}} = \max\!\left(\frac{F_2^n + F_3^n}{2},\; 0\right)
+\end{equation}
+
+\subsection{Weibull Utilisation Index and Fracture Criterion}
+
+\begin{equation}
+    U_W = \frac{F_{\text{eff}}}{F_{f,W}(d_p)}
+\end{equation}
+
+\noindent\textbf{Fracture criterion:} $U_W \geq 1$.
+
+\subsection{DEM Implementation Pipeline}
+
+\begin{enumerate}
+    \item \textbf{Identify the first contact window} from \texttt{op1.dump}
+          (same procedure as Theory~1).
+
+    \item \textbf{Recover contact forces.}
+          Read per-atom forces on ore (atom 1) and mover (atom 2) from
+          \texttt{forces.dump} and apply Newton's third law
+          (Eq.~\ref{sec:sim}) to obtain $\mathbf{F}_{1\leftarrow2}$
+          and $\mathbf{F}_{1\leftarrow3}$ at each timestep.
+
+    \item \textbf{Compute $\hat{\mathbf{n}}$} from atom positions in
+          \texttt{op1.dump} at each timestep.
+
+    \item \textbf{Evaluate $U_W$} at each timestep in the window;
+          record $U_{W,\max}$.
+
+    \item \textbf{Fracture decision:} fracture predicted if
+          $U_{W,\max} \geq 1$.
+\end{enumerate}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Theory 4: Analytic Weibull Energy Criterion}
+\label{sec:theory4}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Specific Fracture Energy}
+
+Integrating the Hertz contact law $F = k\delta^{3/2}$ over two identical contacts
+up to the failure load, normalising by the particle volume $V_p = \tfrac{4}{3}\pi R_S^3$,
+and substituting the Weibull size-scaling law (Eq.~22 of the companion derivation) gives
+the size-dependent specific fracture energy:
+
+\begin{equation}
+    E_{pc}(d_p) = \frac{4.989}{\pi}\,(E^*)^{-2/3}
+                  \left(\frac{R_S}{R^*}\right)^{\!1/3}
+                  \sigma_{pc,0}^{5/3}\,d_0^{5/w}\,d_p^{-5/w}
+\end{equation}
+
+where the Hertz contact quantities are:
+\begin{align}
+    \frac{1}{E^*} &= \frac{1-\nu_S^2}{E_S} + \frac{1-\nu_B^2}{E_B}, \qquad
+    \frac{1}{R^*}  = \frac{1}{R_S} + \frac{1}{R_B}, \qquad
+    R_S = \frac{d_p}{2} = \frac{R}{\chi}
+\end{align}
+
+The ratio $R_S/R^* = (1 + 1/\chi)^{-1}\cdot(1 + \chi)/\chi$ simplifies to
+$(1+1/\chi)$ when $R_B \gg R_S$ (plate limit), and the 4.989/$\pi$ prefactor
+reduces to the Zhang et al.\ platen-test result in that limit.
+
+\subsection{Energy Balance and Critical Velocity}
+
+The available kinetic energy along the compression axis is (using the effective
+compression velocity $v_x = v|\cos\alpha|\cos\gamma$ from Section~\ref{sec:theory2},
+with $\gamma(b,\chi) = \arcsin\!\left(b/(R+R/\chi)\right)$):
+\begin{equation}
+    W_{\text{in}} = \tfrac{1}{2}\,M_{\text{proj}}\,v_x^2
+                  = \tfrac{1}{2}\,M_{\text{proj}}\,(v\cos\alpha\cos\gamma)^2,
+    \qquad M_{\text{proj}} = \tfrac{4}{3}\pi R_B^3\,\rho_B
+\end{equation}
+
+Setting $W_{\text{in}} = V_p\,E_{pc}(d_p)$ and solving for the critical velocity:
+
+\begin{equation}
+\boxed{
+    v_c(\alpha,b,\chi) = \frac{1}{|\cos\alpha|\,\cos\gamma(b,\chi)}
+                  \sqrt{\frac{2\,V_p\,E_{pc}(d_p)}{M_{\text{proj}}}}
+}
+\end{equation}
+
+Substituting $V_p/M_{\text{proj}} = \chi^{-3}/\rho_B$, $\cos\gamma = \sqrt{1-(b/(R+R/\chi))^2}$,
+and the full expression for $E_{pc}$ gives explicitly:
+
+\begin{equation}
+    v_c(\alpha,b,\chi) = \frac{1}{|\cos\alpha|\,\sqrt{1-\left(\dfrac{b}{R+R/\chi}\right)^{\!2}}}
+    \sqrt{
+        \frac{2}{\rho_B\,\chi^3}
+        \cdot
+        \frac{4.989}{\pi}
+        \,(E^*)^{-2/3}
+        \left(\frac{R_S}{R^*}\right)^{\!1/3}
+        \sigma_{pc,0}^{5/3}\,d_0^{5/w}\,d_p^{-5/w}
+    }
+\end{equation}
+
+\noindent\textbf{Fracture criterion:} fracture predicted when $v \geq v_c(\alpha,b,\chi)$.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Geometry-Limiting Regime (Trapping Condition)}
+\label{sec:geometry}
+% ══════════════════════════════════════════════════════════════════════════════
+
+The four theories above govern fracture \emph{once the ore is trapped} between
+the two balls.  Whether trapping occurs at all is a separate question determined
+purely by collision geometry and friction — independent of velocity and fracture
+model.
+
+\subsection{Half-Angle of Approach}
+
+Using $\gamma(b,\chi)$ from Eq.~(18), define $\theta$ as the half-angle between
+the mover–ore contact vector $\hat{\mathbf{r}}_{23}$ and the $x$-axis:
+\begin{equation}
+    \theta(\alpha,b,\chi) = \tfrac{1}{2}\!\left(\alpha + \gamma(b,\chi)\right)
+\end{equation}
+
+\subsection{Force Balance and Coulomb Cone}
+
+At each contact the ore feels a normal force $N_i$ and a tangential (friction)
+force $T_i$:
+\begin{equation}
+    \mathbf{F}_i = N_i(-\hat{\mathbf{r}}_i) + T_i\hat{\boldsymbol{\tau}}_i
+\end{equation}
+
+Coulomb's law requires $|T_i| \leq \mu N_i$, so the admissible resultant
+$\mathbf{F}_i$ lies inside a cone of half-angle $\phi = \arctan\mu$ about the
+inward normal $-\hat{\mathbf{r}}_i$.  For the ore to be \emph{trapped} (not
+ejected sideways), the two contact forces must cancel in the transverse
+direction, which requires $\phi \geq \theta$. The trapping boundary is:
+\begin{equation}
+\boxed{
+    \mu = \tan\theta = \tan\!\left[\tfrac{1}{2}(\alpha + \gamma)\right]
+}
+\end{equation}
+
+\subsection{Critical Angle and Critical Offset}
+
+Substituting $\theta = \frac{1}{2}(\alpha + \gamma)$ and rearranging gives the
+critical impact angle (ore escapes if $|\alpha| > \alpha_c$):
+\begin{equation}
+\boxed{
+    \alpha_c(\mu,b,\chi) = 2\arctan(\mu) - \arcsin\!\left(\frac{b}{R+R/\chi}\right)
+}
+\end{equation}
+
+Rearranging for $b$ gives the critical offset (ore escapes if $b > b_c$):
+\begin{equation}
+\boxed{
+    b_c(\alpha,\mu,\chi) = \left(R + \frac{R}{\chi}\right)\sin(2\arctan\mu - \alpha)
+}
+\end{equation}
+
+\noindent At default parameters ($\chi=4$, $\mu=0.47$, $b=0$):
+$\alpha_c = \pm\,2\arctan(0.47) \approx \pm50.75^{\circ}$.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Simulation Setup}
+\label{sec:sim}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Three-Sphere Geometry}
+
+Three spheres are placed along the $x$-axis:
+\begin{itemize}
+    \item \textbf{Atom 3} — fixed ball (anvil), radius $R$, centre at the origin.
+    \item \textbf{Atom 1} — ore, radius $r = R/\chi$, placed tangent to atom 3
+          at $\mathbf{x}_{\text{ore}} = (R+r,\,0,\,0)$.
+    \item \textbf{Atom 2} — mover (projectile), radius $R$, launched toward the
+          ore at speed $v$, angle $\alpha$, and transverse offset $b$.
+\end{itemize}
+
+The mover's initial centre and velocity components are:
+\begin{align}
+    D        &= R + r + g \quad (g = 0.010\ \text{m launch gap}) \\[4pt]
+    C_{2x}   &= (R+r) + D\cos\alpha + b\sin\alpha \\
+    C_{2y}   &= -D\sin\alpha + b\cos\alpha \\[4pt]
+    v_{2x}   &= -v\cos\alpha, \qquad v_{2y} = v\sin\alpha
+\end{align}
+
+\subsection{Run Duration}
+
+The number of timesteps is determined by solving exactly for the first-contact
+time $T$ (when the mover surface reaches the ore surface):
+\begin{equation}
+    A\,T^2 + B\,T + C = 0, \quad
+    A = |\mathbf{v}|^2,\quad
+    B = 2\,\boldsymbol{\delta}\cdot\mathbf{v},\quad
+    C = |\boldsymbol{\delta}|^2 - (R+r)^2
+\end{equation}
+where $\boldsymbol{\delta} = \mathbf{C}_2 - \mathbf{x}_{\text{ore}}$.
+Taking the smaller root and adding a 5000-step buffer for the contact event:
+\begin{equation}
+    T = \frac{-B - \sqrt{B^2 - 4AC}}{2A}, \qquad
+    N_{\text{steps}} = \left\lfloor \frac{T}{\Delta t} \right\rfloor + 5000
+\end{equation}
+
+\subsection{Friction Mixing}
+
+LAMMPS computes the effective friction between two species as the geometric mean:
+$\mu_{\text{eff}} = \sqrt{\mu_1\,\mu_2}$.
+The ball–ball friction is fixed at $\mu_2 = 0.3$.
+To achieve a desired ore–ball friction $\mu$, the ore friction is set to:
+\begin{equation}
+    \mu_1 = \frac{\mu^2}{0.3}
+\end{equation}
+
+\subsection{LAMMPS Output Files}
+
+Each run produces three dump files, all written every 100 timesteps:
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+File & Type & Contents \\
+\midrule
+\texttt{op1.dump}    & Per-atom (custom) &
+    \texttt{id type x y z vx vy vz omegax omegay omegaz diameter} \\
+                     & & Used for: contact window detection, atom positions, ore diameter \\[4pt]
+\texttt{stress.dump} & Per-atom (custom) &
+    \texttt{id type x y z diameter c\_astress[1..6]} \\
+                     & & Used for: Christensen $U$ (virial stress tensor on ore) \\[4pt]
+\texttt{forces.dump} & Per-atom (custom) &
+    \texttt{id fx fy fz} for atoms 1 (ore) and 2 (mover) \\
+                     & & Used for: Weibull $U_W$ (individual contact forces via Newton's 3rd law) \\
+\bottomrule
+\end{tabular}
+\caption{LAMMPS output files. All three are deleted after post-processing to save disk space.}
+\end{table}
+
+\noindent The individual ore–ball contact forces are recovered from \texttt{forces.dump} as:
+\begin{equation}
+    \mathbf{F}_{1\leftarrow 2} = -\mathbf{f}_{\text{mover}}, \qquad
+    \mathbf{F}_{1\leftarrow 3} = \mathbf{f}_{\text{ore}} + \mathbf{f}_{\text{mover}}
+\end{equation}
+which follows from Newton's third law and the fact that the mover has no wall contact
+during the relevant timesteps.
+
+\end{document}
